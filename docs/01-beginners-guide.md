@@ -147,9 +147,14 @@ still gets an answer; the header says `X-Gateway-Provider: gemini` and
 `X-Gateway-Attempts: 4`.
 
 **Scenario B: you hit Groq's free-tier limit.**
-Groq replies "429 Too Many Requests". The gateway does *not* retry Groq (that would make
-it worse). It marks Groq as cooling down for 30 seconds and moves on. For the next
-30 seconds, every request skips Groq without even trying.
+Groq replies "429 Too Many Requests, retry after 16 seconds". The gateway does *not*
+retry right away (that would make it worse). It puts **that one model** in a 16-second
+time-out and moves on to the next option. Groq's other models keep working, because
+Groq counts each model's limit separately.
+
+If *every* option is in a time-out, the gateway does not give up. It **waits in a queue**
+until the first one frees up (up to 90 seconds), then tries again. The header
+`X-Gateway-Queued-Ms` says how long the request waited.
 
 **Scenario C: no keys at all.**
 Every cloud provider is skipped because it has no key, and Ollama answers everything.
@@ -194,7 +199,9 @@ each request **would cost** at the model's normal paid price (the `prices` secti
 | Fallback | Trying the next option when one fails |
 | Retry with backoff | Trying again after waiting longer each time (0.5s, 1s, 2s, ...) |
 | Rate limit (429) | The provider saying "slow down, too many requests" |
-| Cooldown | Temporarily skipping a provider that rate-limited you |
+| Cooldown | Temporarily skipping a model that rate-limited you |
+| Retry-After | A header where the provider says exactly how long to wait |
+| Wait queue | Holding a request until a rate-limited model frees up, instead of failing |
 | Cache | Saved answers that can be reused |
 | Latency | How long a response takes |
 | p50 / p95 | Half of requests are faster than p50; 95% are faster than p95 |

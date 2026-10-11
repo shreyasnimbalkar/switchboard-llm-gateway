@@ -27,7 +27,8 @@ Built entirely on free tiers: Groq, OpenRouter, Gemini, and a local Ollama model
 | Aliases + fallback chains | Ask for `fast` or `smart`; the gateway tries deployments in order until one works. |
 | `auto` routing | Rules-based router sends simple prompts to `fast` and coding/long/reasoning prompts to `smart`. |
 | Retries with backoff | Timeouts and 5xx errors are retried (0.5s, 1s, …) before falling back. |
-| Rate-limit cooldown | A provider that returns 429 is skipped for 30s instead of being hammered. |
+| Per-model rate-limit cooldown | A model that returns 429 is skipped for as long as the provider's `Retry-After` header says (30s default), without blocking that provider's other models. |
+| Rate-limit wait queue | If every option is rate-limited, the request waits for the first one to free up (up to 90s) instead of failing. |
 | Streaming fallback | Fallback happens before the first byte is sent, so streams fail over too. |
 | Exact cache | Identical requests are answered instantly and for free (`X-Gateway-Cache: bypass` to skip). |
 | Cost + latency logging | Every request is logged with tokens, estimated cost at list price, latency, and time-to-first-token. |
@@ -35,7 +36,7 @@ Built entirely on free tiers: Groq, OpenRouter, Gemini, and a local Ollama model
 
 Every response carries headers showing what happened:
 `X-Gateway-Route`, `X-Gateway-Alias`, `X-Gateway-Provider`, `X-Gateway-Model`,
-`X-Gateway-Attempts`, `X-Gateway-Cache`, `X-Gateway-Est-Cost-USD`.
+`X-Gateway-Attempts`, `X-Gateway-Queued-Ms`, `X-Gateway-Cache`, `X-Gateway-Est-Cost-USD`.
 
 ## Documentation
 
@@ -95,7 +96,8 @@ print(reply.choices[0].message.content)
 ```
 
 The tests use a fake upstream provider, so they run offline with no API keys.
-They cover routing, retries, fallback, cooldowns, caching, streaming, stats, and auth.
+They cover routing, retries, fallback, per-model cooldowns, Retry-After, the wait queue,
+caching, streaming, stats, log migration, and auth.
 
 ## Project layout
 
@@ -119,7 +121,7 @@ tests/             offline test suite
 
 - [x] 1. Core proxy with streaming
 - [x] 2. Request logging: tokens, cost, latency, TTFT
-- [x] 3. Reliability: retries, backoff, fallback, rate-limit cooldown
+- [x] 3. Reliability: retries, backoff, fallback, per-model rate-limit cooldowns, wait queue
 - [ ] 4. Semantic cache (embeddings + similarity threshold), Redis backend
 - [ ] 5. Learned router (classifier) vs. rules baseline
 - [ ] 6. Eval set (~200 prompts) + dashboard: quality vs. cost vs. p95 latency

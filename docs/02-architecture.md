@@ -50,7 +50,9 @@
    A hit returns immediately and is logged with `cache_hit=1` and cost 0.
 4. **Call with fallback.** `_call_with_fallback()` walks the chain:
    - skip deployments whose provider has no API key
-   - skip providers that are cooling down after a 429
+   - skip models that are cooling down after a 429
+   - if every model is rate-limited, wait for the first cooldown to end (up to
+     `max_queue_wait_s`) and try the chain again
    - call the provider; on failure, act on the error kind (table below)
 5. **Account.** Use the provider's reported token usage, or estimate it
    (about 4 characters per token) if missing. Compute estimated cost.
@@ -80,7 +82,7 @@ The engine reacts to the kind:
 |---|---|---|
 | `transient` | timeout, network blip, HTTP 5xx | retry same deployment with backoff (0.5s, 1s), then fall back |
 | `unreachable` | connection refused (e.g. Ollama not running) | fall back immediately, no retry |
-| `rate_limited` | HTTP 429 | cool provider down for 30s, fall back immediately |
+| `rate_limited` | HTTP 429 | cool **that model** down for the `Retry-After` time (30s default), fall back immediately |
 | `auth` | HTTP 401 / 403 | fall back (key wrong or revoked) |
 | `bad_request` | HTTP 400 / 404 / 422 | fall back, no retry (e.g. model ID retired) |
 | `unconfigured` | no API key in `.env` | skip without calling |
@@ -109,8 +111,25 @@ be tuned without redeploying code.
 
 **Retry only what retrying can fix.**
 Timeouts and 5xx errors are often temporary, so they are retried. A 429 means "slow
-down"; retrying immediately makes it worse, so the provider is cooled down instead. A
+down"; retrying immediately makes it worse, so the model is cooled down instead. A
 refused connection will not fix itself in half a second, so it falls back at once.
+
+**Cooldowns are per model, not per provider.**
+Providers such as Groq meter each model separately (on the free tier: 1,000 requests a
+day and 8,000 tokens a minute *per model*). Cooling down the whole provider when one
+model hits its limit would wrongly block models that still have capacity.
+
+**Trust the provider's Retry-After.**
+Per-minute token limits usually clear in seconds, and the 429 response says exactly
+when. Using that value instead of a fixed 30 seconds brings the model back as soon as
+it is usable.
+
+**Queue instead of failing when everything is busy.**
+Long-running clients (agents, benchmark runs) would rather wait 20 seconds than lose a
+half-finished conversation. When every option is rate-limited, the gateway sleeps until
+the earliest cooldown ends and tries again, up to a configurable budget
+(`max_queue_wait_s`, 90s in `config.yaml`; 0 disables it). It never waits for a
+cooldown that would end after the budget, and it never queues for other errors.
 
 **Exponential backoff.**
 Waiting longer between each retry (0.5s, 1s, 2s) gives a struggling provider room to
@@ -154,6 +173,7 @@ One row per request in the `requests` table of `gateway.db`:
 | `provider`, `model` | Who actually answered |
 | `stream`, `cache_hit` | Streaming request? Served from cache? |
 | `status`, `attempts`, `error` | Outcome, number of tries, failure details |
+| `queued_ms` | Time spent waiting in the rate-limit queue |
 | `latency_ms`, `ttft_ms` | Total time and time to first token |
 | `prompt_tokens`, `completion_tokens` | Token usage |
 | `usage_estimated` | 1 if tokens were estimated rather than reported |
@@ -171,7 +191,10 @@ Covered behaviors:
 - alias, `auto`, and direct `provider/model` resolution; unknown models
 - pass-through of extra OpenAI parameters; input validation
 - retries on transient errors; fallback after retries run out
-- no retry on refused connections; cooldown after 429
+- no retry on refused connections; per-model cooldown after 429; Retry-After parsing
+  (seconds and HTTP-date forms); the wait queue (succeeds, gives up past its budget,
+  ignores non-rate-limit errors, works for streaming); queued time in the log; and
+  migration of log files created before the `queued_ms` column existed
 - skipping providers without keys; final status codes (400 / 429 / 502 / 503)
 - cache hits, cache bypass, and parameter-sensitive cache keys
 - streaming pass-through, usage capture, usage estimation, streaming fallback

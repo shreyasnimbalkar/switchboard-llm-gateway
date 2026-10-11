@@ -50,6 +50,7 @@ class CallOutcome:
     deployment: Deployment
     attempts: int
     errors: list[str] = field(default_factory=list)
+    queued_s: float = 0.0  # time spent waiting for rate limits to clear
 
 
 @dataclass
@@ -75,6 +76,8 @@ def _meta_headers(
         headers["X-Gateway-Provider"] = outcome.deployment.provider
         headers["X-Gateway-Model"] = outcome.deployment.model
         headers["X-Gateway-Attempts"] = str(outcome.attempts)
+        if outcome.queued_s:
+            headers["X-Gateway-Queued-Ms"] = f"{outcome.queued_s * 1000:.0f}"
     if cost is not None:
         headers["X-Gateway-Est-Cost-USD"] = f"{cost:.8f}"
     return headers
@@ -120,11 +123,54 @@ class Gateway:
 
     # ---------- reliability ----------
 
-    def cooling_down(self, provider: str) -> float:
-        """Seconds left in this provider's cooldown (0 if available)."""
-        return max(0.0, self._cooldown_until.get(provider, 0.0) - self.clock())
+    def cooling_down(self, name: str) -> float:
+        """Seconds left in a cooldown (0 if available).
+
+        `name` is a deployment key ("groq/openai/gpt-oss-20b") or a provider name
+        ("groq"); for a provider, the longest cooldown among its models is returned.
+        Limits are tracked per model because providers like Groq meter each model
+        separately: one model hitting its limit must not block its siblings.
+        """
+        now = self.clock()
+        remaining = [
+            until - now
+            for key, until in self._cooldown_until.items()
+            if key == name or key.startswith(name + "/")
+        ]
+        return max([0.0, *remaining])
+
+    def _start_cooldown(self, dep: Deployment, error: ProviderError) -> None:
+        # Prefer the provider's own "retry after N seconds" hint; for per-minute
+        # token limits it is usually far shorter than the default cooldown.
+        wait = error.retry_after if error.retry_after is not None else self.settings.cooldown_s
+        self._cooldown_until[dep.key] = self.clock() + max(wait, 0.0)
 
     async def _call_with_fallback(
+        self,
+        res: Resolution,
+        payload: dict[str, Any],
+        call: Callable[[OpenAICompatProvider, dict[str, Any]], Awaitable[T]],
+    ) -> tuple[T, CallOutcome]:
+        """Try the chain; if every deployment is rate-limited, queue (wait for the
+        first cooldown to end) for up to `max_queue_wait_s` before giving up."""
+        deadline = self.clock() + self.settings.max_queue_wait_s
+        queued_s = 0.0
+        while True:
+            try:
+                result, outcome = await self._try_chain(res, payload, call)
+                outcome.queued_s = queued_s
+                return result, outcome
+            except GatewayError as e:
+                if e.status != 429:
+                    raise
+                waits = [self.cooling_down(d.key) for d in res.chain]
+                wait = min((w for w in waits if w > 0), default=1.0)
+                if self.clock() + wait > deadline:
+                    raise
+                await self.sleep(wait)
+                queued_s += wait
+
+    async def _try_chain(
         self,
         res: Resolution,
         payload: dict[str, Any],
@@ -141,7 +187,7 @@ class Gateway:
                 errors.append(f"{dep.key}: skipped (no {provider.cfg.api_key_env} in .env)")
                 kinds.append("unconfigured")
                 continue
-            if self.cooling_down(dep.provider):
+            if self.cooling_down(dep.key):
                 errors.append(f"{dep.key}: skipped (rate-limited, cooling down)")
                 kinds.append("rate_limited")
                 continue
@@ -156,7 +202,7 @@ class Gateway:
                     errors.append(f"{dep.key}: {e.kind} ({e.status}) {e.message[:200]}")
                     kinds.append(e.kind)
                     if e.kind == "rate_limited":
-                        self._cooldown_until[dep.provider] = self.clock() + self.settings.cooldown_s
+                        self._start_cooldown(dep, e)
                     if not e.retryable or retry == max_retries:
                         break
                     await self.sleep(self.settings.backoff_base_s * (2**retry))
@@ -202,6 +248,7 @@ class Gateway:
                 requested_model=res.requested_model, alias=res.alias, routed_by=res.routed_by,
                 provider=outcome.deployment.provider, model=outcome.deployment.model,
                 stream=False, cache_hit=False, status="ok", attempts=outcome.attempts,
+                queued_ms=outcome.queued_s * 1000 or None,
                 latency_ms=(self.clock() - started) * 1000,
                 prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                 usage_estimated=estimated, est_cost_usd=cost,
@@ -279,6 +326,7 @@ class Gateway:
                     routed_by=res.routed_by, provider=outcome.deployment.provider,
                     model=outcome.deployment.model, stream=True, cache_hit=False,
                     status=status, attempts=outcome.attempts,
+                    queued_ms=outcome.queued_s * 1000 or None,
                     latency_ms=(self.clock() - session.started_at) * 1000, ttft_ms=ttft_ms,
                     prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                     usage_estimated=estimated,

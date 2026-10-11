@@ -6,6 +6,7 @@ Run:  uvicorn gateway.main:create_app --factory --reload
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import asynccontextmanager
 from typing import Any, Awaitable, Callable
 
@@ -33,6 +34,7 @@ def create_app(
     settings: Settings | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
     sleep: Callable[[float], Awaitable[None]] | None = None,
+    clock: Callable[[], float] | None = None,
 ) -> FastAPI:
     settings = settings or load_settings()
 
@@ -40,7 +42,9 @@ def create_app(
     async def lifespan(app: FastAPI):
         client = httpx.AsyncClient(transport=transport)
         log = RequestLog(settings.db_path)
-        app.state.gateway = Gateway(settings, client, log, sleep=sleep or asyncio.sleep)
+        app.state.gateway = Gateway(
+            settings, client, log, clock=clock or time.monotonic, sleep=sleep or asyncio.sleep
+        )
         try:
             yield
         finally:

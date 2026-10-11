@@ -53,7 +53,8 @@ class FakeUpstream:
         self._script: dict[str, list[Any]] = {}
 
     def fail(self, host: str, *outcomes: Any) -> None:
-        """Queue outcomes for the next calls to `host`: an HTTP status, "timeout" or "refused"."""
+        """Queue outcomes for the next calls to `host`: an HTTP status, "timeout", "refused",
+        or (status, headers) to send response headers such as Retry-After."""
         self._script.setdefault(host, []).extend(outcomes)
 
     def hosts(self) -> list[str]:
@@ -70,8 +71,13 @@ class FakeUpstream:
             raise httpx.ReadTimeout("timed out", request=request)
         if outcome == "refused":
             raise httpx.ConnectError("connection refused", request=request)
+        headers: dict[str, str] = {}
+        if isinstance(outcome, tuple):
+            outcome, headers = outcome
         if outcome != 200:
-            return httpx.Response(outcome, json={"error": {"message": f"upstream said {outcome}"}})
+            return httpx.Response(
+                outcome, json={"error": {"message": f"upstream said {outcome}"}}, headers=headers
+            )
 
         if payload.get("stream"):
             chunks: list[dict[str, Any]] = [
@@ -108,8 +114,28 @@ def upstream() -> FakeUpstream:
     return FakeUpstream()
 
 
+class FakeClock:
+    """A clock that only moves when the gateway sleeps, so waits are instant but exact."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.slept: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+
 @pytest.fixture
-def make_client(upstream, monkeypatch):
+def clock() -> FakeClock:
+    return FakeClock()
+
+
+@pytest.fixture
+def make_client(upstream, clock, monkeypatch):
     """Build a TestClient. `config` overrides top-level config keys; `env` sets env vars."""
     clients: list[TestClient] = []
 
@@ -122,7 +148,12 @@ def make_client(upstream, monkeypatch):
                 monkeypatch.setenv(name, value)
         raw = copy.deepcopy(BASE_CONFIG)
         raw.update(config or {})
-        app = create_app(settings_from_dict(raw), transport=httpx.MockTransport(upstream.handler))
+        app = create_app(
+            settings_from_dict(raw),
+            transport=httpx.MockTransport(upstream.handler),
+            clock=clock,
+            sleep=clock.sleep,
+        )
         client = TestClient(app)
         client.__enter__()
         clients.append(client)

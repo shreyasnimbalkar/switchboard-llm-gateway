@@ -21,11 +21,36 @@ source for the evaluation and dashboard in steps 5 and 6.
 ### Step 3: Reliability
 
 **What:** Retries with exponential backoff for temporary errors, fallback chains across
-providers, a 30-second cooldown for rate-limited providers, and fallback for streaming
+providers, a cooldown for rate-limited models, and fallback for streaming
 requests before the first byte.
 
 **Why:** Free tiers rate-limit often and providers have outages. The gateway's job is to
 keep apps working when that happens.
+
+### Step 3b: Rate-limit upgrade
+
+**What:** Three changes, made while preparing Switchboard to carry long agent benchmark
+runs on free tiers:
+
+1. **Per-model cooldowns.** The first version cooled down a whole *provider* after a
+   429. Measuring Groq's free tier showed its limits are *per model* (1,000 requests a
+   day and 8,000 tokens a minute each), so one busy model was wrongly blocking the
+   others. Cooldowns are now tracked per `provider/model`.
+2. **Retry-After.** The cooldown now uses the provider's own `Retry-After` header
+   (seconds or HTTP-date) instead of a fixed 30 seconds.
+3. **Wait queue.** If every option is rate-limited, the request waits for the first
+   one to free up (up to `max_queue_wait_s`, 90s) instead of failing. Waiting time is
+   returned in `X-Gateway-Queued-Ms` and logged in a new `queued_ms` column; old log
+   files are migrated automatically.
+
+**Why:** An agent conversation that fails halfway because of a 20-second rate limit is
+wasted work. Waiting is the better trade for long-running clients.
+
+**Verified:** 13 new tests (52 total). Against the real Groq API, 6 parallel
+~2,400-token requests were sent to one model, more than its 8,000 tokens/minute limit:
+5 went straight through (about 0.7 to 1 second each) and 1 was rate-limited. Groq asked
+for a wait of about 16 seconds, the gateway queued it, and it then succeeded. Before the
+change, that request would have failed.
 
 ### Extras added along the way
 
@@ -41,7 +66,7 @@ keep apps working when that happens.
 
 ### Verification so far
 
-- The automated test suite passes (39 tests at the time of writing).
+- The automated test suite passes (52 tests at the time of writing).
 - The gateway was started for real with no keys and Ollama not running. It returned a
   clear error naming each missing piece.
 - With Ollama running `llama3.2:3b` locally and no cloud keys, the demo sent 5 prompts:

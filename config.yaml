@@ -72,7 +72,10 @@ routing:
 reliability:
   max_retries: 2          # extra attempts on the SAME deployment for timeouts / 5xx
   backoff_base_s: 0.5     # waits 0.5s, 1s, 2s, ... between retries
-  cooldown_s: 30          # skip a provider for this long after it rate-limits us (429)
+  cooldown_s: 30          # skip a rate-limited model this long, unless the provider says
+                          # exactly how long to wait (Retry-After header)
+  max_queue_wait_s: 90    # if every option is rate-limited, wait up to this long for one
+                          # to free up instead of failing (0 = fail immediately)
 
 cache:
   ttl_s: 3600

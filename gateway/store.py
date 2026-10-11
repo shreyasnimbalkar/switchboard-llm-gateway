@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS requests (
     completion_tokens INTEGER,
     usage_estimated   INTEGER NOT NULL,   -- 1 if tokens were estimated, not reported
     est_cost_usd      REAL,
-    error             TEXT
+    error             TEXT,
+    queued_ms         REAL                -- time spent waiting for rate limits to clear
 );
 """
 
@@ -50,6 +51,7 @@ class RequestRecord:
     usage_estimated: bool = False
     est_cost_usd: float | None = None
     error: str | None = None
+    queued_ms: float | None = None
 
 
 def percentile(values: list[float], pct: float) -> float | None:
@@ -68,6 +70,14 @@ class RequestLog:
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(SCHEMA)
+            self._migrate()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after a log file was created, so old logs keep working."""
+        existing = {row[1] for row in self._conn.execute("PRAGMA table_info(requests)")}
+        if "queued_ms" not in existing:
+            self._conn.execute("ALTER TABLE requests ADD COLUMN queued_ms REAL")
+            self._conn.commit()
 
     def record(self, rec: RequestRecord) -> None:
         row = asdict(rec)
@@ -97,6 +107,7 @@ class RequestLog:
                 "requests": len(group),
                 "errors": len(group) - len(ok),
                 "cache_hits": sum(1 for r in group if r["cache_hit"]),
+                "queued_requests": sum(1 for r in group if r["queued_ms"]),
                 "p50_latency_ms": percentile(live, 50),
                 "p95_latency_ms": percentile(live, 95),
                 "p50_ttft_ms": percentile(ttfts, 50),

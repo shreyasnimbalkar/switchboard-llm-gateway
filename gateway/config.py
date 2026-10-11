@@ -67,6 +67,7 @@ class Settings:
     max_retries: int = 2
     backoff_base_s: float = 0.5
     cooldown_s: float = 30.0
+    max_queue_wait_s: float = 0.0  # 0 = return 429 at once when everything is rate-limited
     cache_ttl_s: float = 3600.0
     cache_max_entries: int = 1000
     db_path: str = "gateway.db"
@@ -102,6 +103,7 @@ def settings_from_dict(raw: dict[str, Any]) -> Settings:
         max_retries=int(reliability.get("max_retries", 2)),
         backoff_base_s=float(reliability.get("backoff_base_s", 0.5)),
         cooldown_s=float(reliability.get("cooldown_s", 30)),
+        max_queue_wait_s=float(reliability.get("max_queue_wait_s", 0)),
         cache_ttl_s=float(cache.get("ttl_s", 3600)),
         cache_max_entries=int(cache.get("max_entries", 1000)),
         db_path=str(raw.get("db_path", "gateway.db")),

@@ -145,6 +145,7 @@ the header `Authorization: Bearer <GATEWAY_API_KEY>`.
 | `X-Gateway-Alias` | The tier used |
 | `X-Gateway-Provider` / `X-Gateway-Model` | Who actually answered |
 | `X-Gateway-Attempts` | Number of provider calls it took |
+| `X-Gateway-Queued-Ms` | Time spent waiting for a rate limit to clear (only when it waited) |
 | `X-Gateway-Cache` | `hit` or `miss` |
 | `X-Gateway-Est-Cost-USD` | Estimated cost at list price (non-streaming) |
 
@@ -158,7 +159,7 @@ Send `X-Gateway-Cache: bypass` to skip the cache for a request.
 | `aliases` | Each tier's fallback chain, tried in order |
 | `prices` | List price per million tokens, used for cost estimates |
 | `routing` | Rules for `auto`: long-prompt length, conversation length, keywords |
-| `reliability` | Retries, backoff base, rate-limit cooldown |
+| `reliability` | Retries, backoff base, default rate-limit cooldown, wait-queue budget |
 | `cache` | Time-to-live and maximum entries |
 | `db_path` | Where the SQLite request log is stored |
 

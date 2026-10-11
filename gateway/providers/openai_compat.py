@@ -5,6 +5,8 @@ Groq, OpenRouter, Gemini and Ollama all speak this format, so one class covers t
 
 from __future__ import annotations
 
+import email.utils
+import time
 from typing import Any
 
 import httpx
@@ -18,20 +20,44 @@ class ProviderError(Exception):
     # kind values:
     #   "transient"    timeout / network blip / 5xx      -> retry same deployment
     #   "unreachable"  connection refused (e.g. Ollama not running) -> fall back, no retry
-    #   "rate_limited" 429                               -> cool the provider down, fall back
+    #   "rate_limited" 429                               -> cool the model down, fall back
     #   "auth"         401 / 403                         -> fall back (key missing or wrong)
     #   "bad_request"  400 / 404 / 422 etc.              -> fall back, no retry
     #   "unconfigured" no API key set                    -> skip
-    def __init__(self, provider: str, kind: str, message: str, status: int | None = None):
+    def __init__(
+        self,
+        provider: str,
+        kind: str,
+        message: str,
+        status: int | None = None,
+        retry_after: float | None = None,
+    ):
         super().__init__(f"{provider}: {kind} ({status}): {message}")
         self.provider = provider
         self.kind = kind
         self.status = status
         self.message = message
+        self.retry_after = retry_after  # seconds, from the provider's Retry-After header
 
     @property
     def retryable(self) -> bool:
         return self.kind == "transient"
+
+
+def parse_retry_after(value: str | None) -> float | None:
+    """Retry-After is either a number of seconds or an HTTP date (RFC 9110)."""
+    if not value:
+        return None
+    value = value.strip()
+    try:
+        return max(float(value), 0.0)
+    except ValueError:
+        pass
+    try:
+        when = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    return max(when.timestamp() - time.time(), 0.0)
 
 
 def _classify(status: int) -> str:
@@ -68,9 +94,12 @@ class OpenAICompatProvider:
                 self.name, "unconfigured", f"set {self.cfg.api_key_env} in .env to enable"
             )
 
-    def _error_from_response(self, status: int, body: bytes) -> ProviderError:
+    def _error_from_response(
+        self, status: int, body: bytes, headers: httpx.Headers | None = None
+    ) -> ProviderError:
         text = body.decode("utf-8", errors="replace")[:500]
-        return ProviderError(self.name, _classify(status), text, status)
+        retry_after = parse_retry_after(headers.get("retry-after")) if headers else None
+        return ProviderError(self.name, _classify(status), text, status, retry_after)
 
     def _transport_error(self, e: httpx.TransportError) -> ProviderError:
         if isinstance(e, httpx.TimeoutException):
@@ -88,7 +117,7 @@ class OpenAICompatProvider:
         except httpx.TransportError as e:
             raise self._transport_error(e) from e
         if resp.status_code != 200:
-            raise self._error_from_response(resp.status_code, resp.content)
+            raise self._error_from_response(resp.status_code, resp.content, resp.headers)
         return resp.json()
 
     async def open_stream(self, payload: dict[str, Any]) -> httpx.Response:
@@ -112,5 +141,5 @@ class OpenAICompatProvider:
         if resp.status_code != 200:
             body = await resp.aread()
             await resp.aclose()
-            raise self._error_from_response(resp.status_code, body)
+            raise self._error_from_response(resp.status_code, body, resp.headers)
         return resp
