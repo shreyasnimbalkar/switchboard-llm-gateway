@@ -1,0 +1,7 @@
+-r requirements.txt
+
+# tests
+pytest>=8.0
+
+# building docs/*.pdf from docs/*.md (scripts/build_docs.py)
+reportlab>=4.0

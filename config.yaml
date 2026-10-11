@@ -1,0 +1,81 @@
+# Switchboard configuration.
+#
+# providers: where requests can be sent. All of these expose an OpenAI-compatible
+#            /chat/completions endpoint, so one adapter handles every provider.
+# aliases:   the "virtual models" clients ask for. Each alias is a fallback chain:
+#            the gateway tries deployments in order until one succeeds.
+# prices:    reference list prices (USD per 1M tokens) used to ESTIMATE cost, even
+#            when you're on a free tier. Verify against each provider's pricing page.
+#
+# Model IDs change over time. If `python scripts/check_providers.py` reports a 404
+# for a model, look up the current ID in that provider's dashboard and update it here.
+
+providers:
+  groq:
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+  openrouter:
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    extra_headers:
+      X-Title: switchboard
+  gemini:
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    api_key_env: GEMINI_API_KEY
+  ollama:
+    base_url: http://localhost:11434/v1
+    timeout_s: 120   # local models on a laptop GPU can be slow on first load
+
+aliases:
+  fast:
+    - { provider: groq, model: openai/gpt-oss-20b }
+    - { provider: gemini, model: gemini-3.1-flash-lite }
+    - { provider: ollama, model: "llama3.2:3b" }
+  smart:
+    - { provider: openrouter, model: "nvidia/nemotron-3-ultra-550b-a55b:free" }
+    - { provider: groq, model: openai/gpt-oss-120b }
+    - { provider: gemini, model: gemini-3.5-flash }
+    - { provider: ollama, model: "llama3.2:3b" }
+  local:
+    - { provider: ollama, model: "llama3.2:3b" }
+
+prices:
+  # "provider/model": { input: $ per 1M input tokens, output: $ per 1M output tokens }
+  # Reference list prices from OpenRouter's public model list (checked Oct 2026).
+  # Free-tier models are priced at their paid equivalent so savings estimates are meaningful.
+  "groq/openai/gpt-oss-20b": { input: 0.018, output: 0.09 }
+  "groq/openai/gpt-oss-120b": { input: 0.037, output: 0.17 }
+  "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free": { input: 0.50, output: 2.20 }
+  "gemini/gemini-3.1-flash-lite": { input: 0.25, output: 1.50 }
+  "gemini/gemini-3.5-flash": { input: 1.50, output: 9.00 }
+  "ollama/llama3.2:3b": { input: 0.0, output: 0.0 }
+
+routing:
+  # Used when a client asks for model "auto". Matching any rule sends the request
+  # to `smart`; otherwise it goes to `fast`. (Step 5 replaces this with a classifier.)
+  long_prompt_chars: 4000
+  long_conversation_turns: 6
+  smart_keywords:
+    - code
+    - debug
+    - function
+    - algorithm
+    - prove
+    - step by step
+    - analyze
+    - analyse
+    - compare
+    - explain why
+    - sql
+    - regex
+
+reliability:
+  max_retries: 2          # extra attempts on the SAME deployment for timeouts / 5xx
+  backoff_base_s: 0.5     # waits 0.5s, 1s, 2s, ... between retries
+  cooldown_s: 30          # skip a provider for this long after it rate-limits us (429)
+
+cache:
+  ttl_s: 3600
+  max_entries: 1000
+
+db_path: gateway.db

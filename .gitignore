@@ -1,0 +1,21 @@
+# secrets
+.env
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# runtime data
+*.db
+*.db-journal
+
+# personal notes (interview prep etc.) - not for the public repo
+docs/private/
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
