@@ -1,93 +1,85 @@
 # Switchboard
 
 [![tests](https://github.com/shreyasnimbalkar/switchboard-llm-gateway/actions/workflows/tests.yml/badge.svg)](https://github.com/shreyasnimbalkar/switchboard-llm-gateway/actions/workflows/tests.yml)
-![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)
-![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
-**An OpenAI-compatible LLM gateway.** Switchboard sits between apps and LLM providers.
-It decides **which model** handles each request, **survives provider failures**,
-**caches** repeated questions, and **records cost and latency** for every call.
+Switchboard is a small LLM gateway with an OpenAI-compatible API. Apps send chat
+requests to it instead of calling providers directly. It picks a model, retries or
+falls back when a provider fails, caches repeated requests, and logs the cost and
+latency of every call.
 
-Built entirely on free tiers: Groq, OpenRouter, Gemini, and a local Ollama model.
+I run it on free tiers (Groq, OpenRouter, Gemini) plus a local Ollama model. Free
+tiers rate-limit constantly, which is why a lot of the code is about 429s.
 
-```
- your app ──► /v1/chat/completions ──► Switchboard ──┬──► Groq        (fast tier)
-  (any OpenAI client)                   │            ├──► OpenRouter  (smart tier)
-                                        │            ├──► Gemini      (fallback)
-                                        │            └──► Ollama      (local, last resort)
-                                        ▼
-                         route · retry · fall back · cache · log (SQLite)
-```
+## Features
 
-## Features (so far)
+- `/v1/chat/completions` in the OpenAI format, including streaming. The OpenAI SDK
+  works by pointing `base_url` at the gateway.
+- Model aliases (`fast`, `smart`, `local`) that map to ordered fallback chains in
+  `config.yaml`. Asking for `auto` picks an alias using simple keyword and length rules.
+- Retries for timeouts and 5xx errors with exponential backoff, then fallback to the
+  next model in the chain.
+- Per-model rate-limit handling. A model that returns 429 is skipped for as long as its
+  `Retry-After` header says. If every model in the chain is rate-limited, the request
+  waits for the first one to free up (90 s by default) instead of failing.
+- Failover for streaming requests, as long as nothing has been sent to the client yet.
+- An in-memory cache for identical requests.
+- A SQLite log of tokens, estimated cost, latency, time to first token and queue time
+  for every request, summarized at `/stats`.
 
-| Feature | What it does |
-|---|---|
-| OpenAI-compatible API | Any OpenAI SDK works by changing `base_url`. Streaming supported. |
-| Aliases + fallback chains | Ask for `fast` or `smart`; the gateway tries deployments in order until one works. |
-| `auto` routing | Rules-based router sends simple prompts to `fast` and coding/long/reasoning prompts to `smart`. |
-| Retries with backoff | Timeouts and 5xx errors are retried (0.5s, 1s, …) before falling back. |
-| Per-model rate-limit cooldown | A model that returns 429 is skipped for as long as the provider's `Retry-After` header says (30s default), without blocking that provider's other models. |
-| Rate-limit wait queue | If every option is rate-limited, the request waits for the first one to free up (up to 90s) instead of failing. |
-| Streaming fallback | Fallback happens before the first byte is sent, so streams fail over too. |
-| Exact cache | Identical requests are answered instantly and for free (`X-Gateway-Cache: bypass` to skip). |
-| Cost + latency logging | Every request is logged with tokens, estimated cost at list price, latency, and time-to-first-token. |
-| `/stats` | p50/p95 latency, error rate, cache hits, and cost per deployment, alias, and routing rule. |
+Responses carry `X-Gateway-*` headers saying which model answered, how many attempts
+it took, whether it hit the cache, how long it queued and what it cost.
 
-Every response carries headers showing what happened:
-`X-Gateway-Route`, `X-Gateway-Alias`, `X-Gateway-Provider`, `X-Gateway-Model`,
-`X-Gateway-Attempts`, `X-Gateway-Queued-Ms`, `X-Gateway-Cache`, `X-Gateway-Est-Cost-USD`.
+See [DESIGN.md](DESIGN.md) for how requests flow through the gateway and why it
+handles failures the way it does.
 
-## Documentation
-
-| Document | What's inside |
-|---|---|
-| [Part 1: The project in simple words](docs/01-beginners-guide.md) | What it does, the problem it solves, how a request travels step by step |
-| [Part 2: How it is built](docs/02-architecture.md) | Components, request lifecycle, error handling, design decisions, testing |
-| [Part 3: Setup and usage](docs/03-setup-and-usage.md) | Installing, free API keys, running, API reference, troubleshooting |
-| [Part 4: Build log and roadmap](docs/04-build-log-and-roadmap.md) | What was built and why, verification results, next steps, limitations |
-| [Full documentation (PDF)](docs/Switchboard-Documentation.pdf) | All four parts in one PDF |
-
-The PDF is generated from the Markdown files: `.venv\Scripts\python scripts\build_docs.py`.
-
-## Setup (Windows)
+## Quick start
 
 ```powershell
 git clone https://github.com/shreyasnimbalkar/switchboard-llm-gateway.git
 cd switchboard-llm-gateway
 python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements-dev.txt
-copy .env.example .env        # then paste your free API keys into .env
-ollama pull llama3.2:3b       # local model (install Ollama first: https://ollama.com/download)
-.venv\Scripts\python scripts\check_providers.py   # verify every key/model works
+copy .env.example .env               # add your API keys
+ollama pull llama3.2:3b              # optional local fallback model
+.venv\Scripts\python scripts\check_providers.py
+.venv\Scripts\uvicorn gateway.main:create_app --factory
 ```
 
-## Run
+On macOS or Linux use `.venv/bin/` instead of `.venv\Scripts\`.
 
-```powershell
-.venv\Scripts\uvicorn gateway.main:create_app --factory --reload
-```
+`check_providers.py` sends one tiny prompt to every model in `config.yaml` and tells
+you which keys and model IDs work. Free-tier model IDs change often, so run it first.
 
-Then in another terminal:
-
-```powershell
-.venv\Scripts\python scripts\demo.py      # sends sample prompts, shows routing + cost
-```
-
-Interactive API docs: http://127.0.0.1:8000/docs · Stats: http://127.0.0.1:8000/stats
-
-### Use it from any OpenAI client
+## Usage
 
 ```python
 from openai import OpenAI
 
 client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="unused-locally")
 reply = client.chat.completions.create(
-    model="auto",  # or "fast", "smart", or "groq/openai/gpt-oss-20b"
+    model="auto",  # or "fast", "smart", "local", or "groq/openai/gpt-oss-20b"
     messages=[{"role": "user", "content": "Explain recursion in one sentence."}],
 )
 print(reply.choices[0].message.content)
 ```
+
+`scripts/demo.py` sends a few prompts through a running gateway and prints where each
+one was routed and what it cost. Other endpoints: `/v1/models`, `/health`, `/stats`,
+`/logs/recent`. Set `GATEWAY_API_KEY` in `.env` before exposing the gateway publicly.
+
+## Results so far
+
+From demo runs against the real providers:
+
+- The fast tier (Groq `gpt-oss-20b`) answered with a median latency of about 0.5 s.
+- At list prices the smart model is about 25 times more expensive per token than the
+  fast one, which is the whole case for routing easy prompts away from it.
+- Six parallel requests to one Groq model went over its 8,000 tokens per minute limit.
+  Five went straight through and one was rate-limited; the gateway queued it for the
+  16 seconds Groq asked for, and it then succeeded.
+
+Costs are estimates. Free tiers bill nothing, so each call is priced at the model's
+list price from `config.yaml`.
 
 ## Tests
 
@@ -95,47 +87,36 @@ print(reply.choices[0].message.content)
 .venv\Scripts\python -m pytest -q
 ```
 
-The tests use a fake upstream provider, so they run offline with no API keys.
-They cover routing, retries, fallback, per-model cooldowns, Retry-After, the wait queue,
-caching, streaming, stats, log migration, and auth.
+52 tests, all offline. They use a scriptable fake upstream (return 500 three times,
+then succeed; return 429 with `Retry-After: 5`) and a fake clock, so the retry and
+queue logic is checked exactly without real waiting.
 
-## Project layout
+## Layout
 
 ```
 gateway/
-  main.py          HTTP API (FastAPI)
-  engine.py        resolve -> retry/fallback -> log  (the core)
-  router.py        rules-based "auto" router
-  cache.py         exact-match LRU + TTL cache
-  store.py         SQLite request log + /stats aggregation
-  usage.py         token estimation + cost at list price
-  config.py        config.yaml + .env loading
-  providers/       one adapter for every OpenAI-compatible provider
-config.yaml        providers, aliases (fallback chains), prices, routing rules
-docs/              documentation (Markdown + PDF)
-scripts/           check_providers.py, demo.py, build_docs.py
-tests/             offline test suite
+  main.py        FastAPI app and endpoints
+  engine.py      resolve -> cache -> call with retries/fallback/queue -> log
+  router.py      rules for "auto"
+  cache.py       exact-match LRU cache with TTL
+  store.py       SQLite request log and /stats
+  usage.py       token estimates and cost
+  config.py      config.yaml + .env loading
+  providers/     one adapter for every OpenAI-compatible provider
+config.yaml      providers, fallback chains, prices, routing rules, limits
+scripts/         check_providers.py, demo.py
+tests/
 ```
 
-## Roadmap
+## Limitations and next steps
 
-- [x] 1. Core proxy with streaming
-- [x] 2. Request logging: tokens, cost, latency, TTFT
-- [x] 3. Reliability: retries, backoff, fallback, per-model rate-limit cooldowns, wait queue
-- [ ] 4. Semantic cache (embeddings + similarity threshold), Redis backend
-- [ ] 5. Learned router (classifier) vs. rules baseline
-- [ ] 6. Eval set (~200 prompts) + dashboard: quality vs. cost vs. p95 latency
-- [ ] 7. Deploy + results write-up
-
-## Notes
-
-- **Costs are estimates.** Free-tier calls cost $0, so the gateway prices each call at
-  the model's published list price (`prices` in `config.yaml`) to measure what routing
-  would save in production. Verify those prices against each provider's pricing page.
-- **Free tiers may use your data for training.** Only send test or synthetic prompts.
-- **Model IDs change.** If `check_providers.py` reports `bad_request` for a model,
-  look up the current ID in that provider's dashboard and update `config.yaml`.
+- Cache, cooldowns and the queue live in one process. Running several instances would
+  need shared state (Redis).
+- The `auto` router is keyword based and crude. "Write a haiku about code" goes to the
+  expensive tier.
+- Next: a semantic cache (match questions by meaning, not exact text), a learned
+  router, and an eval set to measure the cost/quality trade-off properly.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT

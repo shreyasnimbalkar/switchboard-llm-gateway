@@ -52,7 +52,7 @@ prices:
 
 routing:
   # Used when a client asks for model "auto". Matching any rule sends the request
-  # to `smart`; otherwise it goes to `fast`. (Step 5 replaces this with a classifier.)
+  # to `smart`; otherwise it goes to `fast`.
   long_prompt_chars: 4000
   long_conversation_turns: 6
   smart_keywords:

@@ -1,7 +1,7 @@
 """Decide which alias handles a request when the client asks for model "auto".
 
 This is a deliberately simple rules-based router. It's the baseline that the
-learned classifier (step 5) has to beat in the evals.
+learned router has to beat.
 """
 
 from __future__ import annotations

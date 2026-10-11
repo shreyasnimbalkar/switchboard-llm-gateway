@@ -11,9 +11,6 @@ __pycache__/
 *.db
 *.db-journal
 
-# personal notes (interview prep etc.) - not for the public repo
-docs/private/
-
 # editors / OS
 .vscode/
 .idea/
